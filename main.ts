@@ -1,4 +1,4 @@
-import { Plugin, MarkdownPostProcessorContext, MarkdownView, Notice, PluginSettingTab, App, Setting } from 'obsidian';
+import { Plugin, MarkdownPostProcessorContext, MarkdownView, Notice, PluginSettingTab, App, Setting, MarkdownRenderer } from 'obsidian';
 import * as child_process from 'child_process';
 
 interface ExecutePythonSettings {
@@ -25,121 +25,78 @@ export default class ExecutePython extends Plugin {
     }
 
     processPythonCodeBlock(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) {
-        let noInput = source.includes("#noinput");
-	source = source.replace("#noinput\n", "");
-	source = source.replace("#noinput", "");
-
         if (this.settings.showCodeInPreview) {
-            let codeBlock = el.createEl('pre');
-            let codeElement = codeBlock.createEl('code');
-            codeElement.className = "language-python";
-            codeElement.textContent = source;
+            const pre = el.createEl('pre');
+            const code = pre.createEl('code', { cls: 'language-python' });
+            
+            // @ts-ignore
+            if (window.Prism && window.Prism.languages.python) {
+                // @ts-ignore
+                code.innerHTML = window.Prism.highlight(source, window.Prism.languages.python, 'python');
+                code.addClass('is-loaded');
+            } else {
+                code.textContent = source;
+                // @ts-ignore
+                if (window.Prism) {
+                    // @ts-ignore
+                    window.Prism.highlightElement(code);
+                }
+            }
         }
 
-        const outputArea = el.createEl('div', { cls: 'python-output', attr: {style: 'white-space: pre-wrap;'} });
-
-        this.runPythonCode(source, outputArea, noInput);
+        // Run the Python code only if the source starts with "# run"
+        if (source.trim().startsWith("# run")) {
+            const outputArea = el.createEl('pre', { cls: 'python-output' });
+            this.runPythonCode(source, outputArea);
+        }
     }
 
-    addRunButtons(mdView: MarkdownView, el: HTMLElement) {
-        el.querySelectorAll('pre.language-python').forEach((block: HTMLPreElement) => {
-            let noInput = block.textContent.includes("#noinput");
-            if (this.settings.showCodeInPreview) {
-                let codeBlock = block.createEl('pre');
-                let codeElement = codeBlock.createEl('code');
-                codeElement.className = "language-python";
-                codeElement.textContent = block.textContent;
-            }
 
-            const source = block.querySelector('code')?.textContent || '';
-            const outputArea = block.createEl('div', { cls: 'python-output', attr: {style: 'white-space: pre-wrap;'} });
-
-            this.runPythonCode(source, outputArea, noInput);
-        });
-    }
-
-    async runPythonCode(source: string, outputArea: HTMLElement, noInput: boolean = false) {
+    async runPythonCode(source: string, outputArea: HTMLElement) {
         outputArea.textContent = '';  // Clear the output area before each run
 
-        let inputField;
-        let submitButton;
-        if (!noInput) {
-            inputField = outputArea.createEl('input', { attr: {type: 'text'} });
-            submitButton = outputArea.createEl('button', { text: 'Submit Input' });
-        }
-        let runButton = outputArea.createEl('button', { text: 'Start' });
-        let resetButton = outputArea.createEl('button', { text: 'Reset' });
-        let outputPre = null;
-        
-        let pythonProcess: child_process.ChildProcessWithoutNullStreams;
-        let handleOutput: Promise<void>;
+        let outputCode: HTMLElement | null = null;
 
-        const reset = () => {
-            pythonProcess && pythonProcess.kill();
-            inputField && (inputField.value = '');
-            outputPre && outputArea.removeChild(outputPre);
-            outputPre = null;
-        };
+        const pythonProcess = child_process.spawn(this.settings.pythonPath, ['-u', '-c', source]);
 
-        const run = async () => {
-            pythonProcess = child_process.spawn(this.settings.pythonPath, ['-u', '-c', source]);
-
-            const submitInput = () => {
-                pythonProcess.stdin.write(inputField.value + "\n");
-                inputField.value = '';
-            };
-
-            if (!noInput) {
-                submitButton.addEventListener('click', submitInput);
-                inputField.addEventListener('keyup', (event) => {
-                    if (event.key === 'Enter') {
-                        submitInput();
-                    }
-                });
-            }
-
-            handleOutput = new Promise((resolve, reject) => {
-                pythonProcess.stdout.on('data', (data) => {
-                    if (!outputPre) {
-                        outputPre = outputArea.createEl('pre');
-                    }
-                    outputPre.append(data.toString());
-                });
-
-                pythonProcess.stderr.on('data', (data) => {
-                    if (!outputPre) {
-                        outputPre = outputArea.createEl('pre');
-                    }
-                    outputPre.append(`Error: ${data}`);
-                });
-
-                pythonProcess.on('close', (code) => {
-                    if (this.settings.showExitCode) {
-                        if (!outputPre) {
-                            outputPre = outputArea.createEl('pre');
-                        }
-                        outputPre.append(`\nPython exited with code: ${code}`);
-                    }
-                    resolve();
-                });
-
-                pythonProcess.on('error', (err) => {
-                    reject(err);
-                });
+        const handleOutput = new Promise<void>((resolve, reject) => {
+            pythonProcess.stdout.on('data', (data) => {
+                if (!outputCode) {
+                    outputCode = outputArea.createEl('code');
+                }
+                outputCode.append(data.toString());
             });
 
-            try {
-                await handleOutput;
-            } catch (err) {
-                if (!outputPre) {
-                    outputPre = outputArea.createEl('pre');
+            pythonProcess.stderr.on('data', (data) => {
+                if (!outputCode) {
+                    outputCode = outputArea.createEl('span', { cls: 'python-error-output' });
                 }
-                outputPre.append(`\nAn error occurred: ${err}`);
-            }
-        };
+                outputCode.append(`Error: ${data}`);
+            });
 
-        runButton.addEventListener('click', run);
-        resetButton.addEventListener('click', reset);
+            pythonProcess.on('close', (code) => {
+                if (this.settings.showExitCode) {
+                    if (!outputCode) {
+                        outputCode = outputArea.createEl('span');
+                    }
+                    outputCode.append(`\nPython exited with code: ${code}`);
+                }
+                resolve();
+            });
+
+            pythonProcess.on('error', (err) => {
+                reject(err);
+            });
+        });
+
+        try {
+            await handleOutput;
+        } catch (err) {
+            if (!outputCode) {
+                outputCode = outputArea.createEl('span', { cls: 'python-error-output' });
+            }
+            outputCode.append(`\nAn error occurred: ${err}`);
+        }
     }
 
     async loadSettings() {
@@ -160,7 +117,7 @@ class MyPluginSettingTab extends PluginSettingTab {
     }
 
     display(): void {
-        let {containerEl} = this;
+        let { containerEl } = this;
 
         containerEl.empty();
         new Setting(containerEl)

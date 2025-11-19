@@ -6,3 +6,11 @@ available in the app when your plugin is enabled.
 If your plugin does not need CSS, delete this file.
 
 */
+
+.python-error-output {
+    color: var(--color-red) !important;
+}
+
+.python-output {
+    margin-top: 1em !important;
+}
